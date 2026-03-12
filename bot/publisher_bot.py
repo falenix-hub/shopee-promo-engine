@@ -150,19 +150,25 @@ def category_hashtag(category: str) -> str:
     return mapping.get(category.lower(), '#PromoPilihan')
 
 
-def build_post_text(label: str, short_link: str, category: str = 'general', reason: str = '', price_previous: str = '', price_current: str = '') -> str:
-    lines = ['🔥 *Promo Shopee Pilihan*', f'*{label or "Produk Pilihan"}*', '']
-    if price_previous and price_current:
+def build_post_text(label: str, short_link: str, category: str = 'general', reason: str = '', price_previous: str = '', price_current: str = '', rating: str = '', sold_count: str = '', drop_amount: str = '', drop_percent: str = '') -> str:
+    lines = ['🔥 *Harga Turun*', f'*{label or "Produk Pilihan"}*', '']
+    if price_previous:
         lines.append(f'💸 Harga normal: *{price_previous}*')
+    if price_current:
         lines.append(f'🛒 Harga sekarang: *{price_current}*')
-    if reason:
-        lines.append('')
-        lines.append(reason)
-    else:
-        lines.append('')
-        lines.append('Cek promo produk pilihan ini sekarang sebelum harganya berubah lagi.')
+    if drop_amount or drop_percent:
+        drop_text = drop_amount or '-'
+        if drop_percent:
+            drop_text += f' ({drop_percent})' if '%' in drop_percent else f' ({drop_percent}%)'
+        lines.append(f'📉 Hemat: *{drop_text}*')
+    if rating or sold_count:
+        rating_text = rating or '-'
+        sold_text = sold_count or '-'
+        lines.append(f'⭐ Rating: *{rating_text}* | Terjual: *{sold_text}*')
     lines.append('')
-    lines.append('👉 Link promo:')
+    lines.append(reason or 'Cek promo produk pilihan ini sekarang sebelum harganya berubah lagi.')
+    lines.append('')
+    lines.append('👉 Cek promonya di sini:')
     lines.append(short_link)
     lines.append('')
     lines.append(f'#PromoShopee {category_hashtag(category)}')
@@ -233,8 +239,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         'Pemburu Promo Shopee Bot siap.\n\n'
         'Mode manual:\n'
-        '/post <short_affiliate_link> - langsung post ke channel\n'
-        '/preview <short_affiliate_link> - preview caption tanpa kirim\n'
+        '/post <payload_lengkap> - post ke channel dengan caption lengkap\n'
+        '/preview <payload_lengkap> - preview caption tanpa kirim\n'
         '/add_watch <short_link> | <label> | <category> | <reason> | <harga_lama> | <harga_sekarang>\n'
         '/list_watch - lihat watchlist aktif\n\n'
         'Mode otomatis V1:\n'
@@ -243,7 +249,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         '/auto_status - status auto mode\n'
         '/run_once - jalankan 1 siklus auto sekarang\n\n'
         f'Status auto saat ini: {auto_mode.upper()}\n'
-        'Catatan V1: manual mode menerima short affiliate link s.shopee.co.id; auto mode masih berbasis watchlist, belum full scraping harga live.'
+        'Catatan V1: manual mode menerima short affiliate link s.shopee.co.id + metadata produk lengkap; auto mode masih berbasis watchlist, belum full scraping harga live.'
     )
     await update.message.reply_text(text)
 
@@ -252,34 +258,61 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await start_cmd(update, context)
 
 
+def parse_manual_payload(raw: str) -> Optional[dict]:
+    parts = [x.strip() for x in raw.split('|')]
+    if len(parts) < 8:
+        return None
+    while len(parts) < 9:
+        parts.append('')
+    short_link, label, category, reason, price_previous, price_current, rating, sold_count, drop_text = parts[:9]
+    if not validate_affiliate_link(short_link):
+        return None
+    drop_amount = ''
+    drop_percent = ''
+    if drop_text:
+        if '/' in drop_text:
+            a, b = [x.strip() for x in drop_text.split('/', 1)]
+            drop_amount, drop_percent = a, b
+        else:
+            drop_amount = drop_text
+    return {
+        'short_link': short_link,
+        'label': label,
+        'category': category or 'general',
+        'reason': reason,
+        'price_previous': price_previous,
+        'price_current': price_current,
+        'rating': rating,
+        'sold_count': sold_count,
+        'drop_amount': drop_amount,
+        'drop_percent': drop_percent,
+    }
+
+
 async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_unauthorized(update):
         return
-    if not context.args:
-        await update.message.reply_text('Format: /preview <short_affiliate_link>')
+    raw = ' '.join(context.args).strip()
+    payload = parse_manual_payload(raw)
+    if not payload:
+        await update.message.reply_text('Format V1: /preview <short_link> | <nama produk> | <category> | <reason> | <harga_lama> | <harga_sekarang> | <rating> | <sold_count> | <hemat_nominal/hemat_percent>')
         return
-    link = context.args[0].strip()
-    if not validate_affiliate_link(link):
-        await update.message.reply_text('Link tidak valid. V1 hanya menerima short affiliate link seperti https://s.shopee.co.id/...')
-        return
-    text = build_post_text('Produk Pilihan Shopee', link, 'general')
+    text = build_post_text(**payload)
     await update.message.reply_text(text, parse_mode='Markdown', disable_web_page_preview=False)
 
 
 async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_unauthorized(update):
         return
-    if not context.args:
-        await update.message.reply_text('Format: /post <short_affiliate_link>')
+    raw = ' '.join(context.args).strip()
+    payload = parse_manual_payload(raw)
+    if not payload:
+        await update.message.reply_text('Format V1: /post <short_link> | <nama produk> | <category> | <reason> | <harga_lama> | <harga_sekarang> | <rating> | <sold_count> | <hemat_nominal/hemat_percent>\n\nContoh:\n/post https://s.shopee.co.id/7VBbZivajq | Himalaya Brightening Vitamin C - Orange Face Serum 15ml | beauty | Cocok buat yang lagi cari serum vitamin C dengan rating bagus dan harga lagi turun lumayan. | Rp61.800 | Rp29.285 | 4.9 | 5RB+ | Rp32.515/53%')
         return
-    link = context.args[0].strip()
-    if not validate_affiliate_link(link):
-        await update.message.reply_text('Link tidak valid. V1 hanya menerima short affiliate link seperti https://s.shopee.co.id/...')
-        return
-    text = build_post_text('Produk Pilihan Shopee', link, 'general')
+    text = build_post_text(**payload)
     await update.message.reply_chat_action(ChatAction.TYPING)
     msg_id = await send_channel_post(context.application, text)
-    log_post('manual', 'Produk Pilihan Shopee', link, 'general', '', msg_id)
+    log_post('manual', payload['label'], payload['short_link'], payload['category'], payload['reason'], msg_id)
     await update.message.reply_text(f'Berhasil dipost ke channel. message_id={msg_id}')
 
 
