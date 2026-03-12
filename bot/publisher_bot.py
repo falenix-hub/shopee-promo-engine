@@ -10,6 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
+import urllib.request
+import urllib.parse
+import re
+import json as pyjson
 
 from dotenv import load_dotenv
 from telegram import BotCommand, Update
@@ -150,6 +154,131 @@ def category_hashtag(category: str) -> str:
     return mapping.get(category.lower(), '#PromoPilihan')
 
 
+def infer_category(name: str) -> str:
+    n = (name or '').lower()
+    if any(x in n for x in ['serum', 'skincare', 'cream', 'facial', 'masker wajah', 'toner', 'sunscreen']):
+        return 'beauty'
+    if any(x in n for x in ['baju', 'celana', 'kaos', 'kemeja', 'hoodie', 'fashion', 'dress', 'hijab']):
+        return 'fashion'
+    if any(x in n for x in ['lampu', 'rak', 'organizer', 'sprei', 'kursi', 'meja', 'home', 'dapur']):
+        return 'home'
+    if any(x in n for x in ['vitamin', 'supplement', 'health', 'kapsul']):
+        return 'health'
+    if any(x in n for x in ['earphone', 'charger', 'kabel', 'mouse', 'keyboard', 'power bank', 'gadget']):
+        return 'gadget'
+    return 'general'
+
+
+def generate_reason(name: str, category: str, rating: str, sold_count: str, price_current: str) -> str:
+    category = category or infer_category(name)
+    if category == 'beauty':
+        return f'Cocok buat yang lagi cari {name.lower()} dengan rating bagus dan harga lagi menarik.'
+    if category == 'fashion':
+        return f'Menarik buat yang lagi cari item fashion dengan harga lebih hemat dari biasanya.'
+    if category == 'home':
+        return f'Worth it dicek kalau kamu lagi cari kebutuhan rumah dengan harga promo.'
+    if category == 'health':
+        return f'Cocok buat yang lagi cari produk health dengan reputasi bagus dan harga lagi turun.'
+    if category == 'gadget':
+        return f'Menarik buat yang lagi cari aksesoris gadget dengan harga promo dan demand bagus.'
+    return f'Cek promo produk ini sekarang, apalagi kalau kamu lagi butuh barang seperti ini.'
+
+
+def generate_cta(category: str) -> str:
+    cta_map = {
+        'beauty': 'Kalau memang lagi cari skincare yang cocok, langsung cek detail dan checkout dari link ini.',
+        'fashion': 'Kalau modelnya masuk dan harganya pas, langsung cek dan amankan dari link ini.',
+        'home': 'Kalau lagi butuh buat rumah, langsung cek promo dan pertimbangkan checkout sekarang.',
+        'health': 'Kalau produk ini memang kamu butuhkan, langsung cek detailnya dari link berikut.',
+        'gadget': 'Kalau lagi cari aksesoris gadget yang worth it, langsung cek dan beli dari link ini.',
+        'general': 'Kalau produknya cocok buat kamu, langsung cek promo dan beli dari link ini.',
+    }
+    return cta_map.get(category, cta_map['general'])
+
+
+def format_price(value: int) -> str:
+    return 'Rp{:,.0f}'.format(value).replace(',', '.')
+
+
+def parse_sold_count(v) -> str:
+    try:
+        n = int(v)
+        if n >= 1000:
+            ribu = round(n / 1000)
+            return f'{ribu}RB+'
+        return str(n)
+    except Exception:
+        return '-'
+
+
+def resolve_short_link(short_link: str) -> str:
+    req = urllib.request.Request(short_link, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return resp.geturl()
+
+
+def extract_shop_item_ids(url: str):
+    m = re.search(r'i\.(\d+)\.(\d+)', url)
+    if not m:
+        m = re.search(r'/product/(\d+)/(\d+)', url)
+    if not m:
+        return None, None
+    return m.group(1), m.group(2)
+
+
+def fetch_product_metadata(short_link: str) -> dict:
+    final_url = resolve_short_link(short_link)
+    shop_id, item_id = extract_shop_item_ids(final_url)
+    slug = final_url.split('/')[-1]
+    slug_name = re.sub(r'-i\.\d+\.\d+.*$', '', slug).replace('-', ' ').strip()
+    if not shop_id or not item_id:
+        return {
+            'label': slug_name.title() or 'Produk Shopee',
+            'category': infer_category(slug_name),
+            'reason': generate_reason(slug_name, infer_category(slug_name), '-', '-', ''),
+            'price_previous': '',
+            'price_current': '',
+            'rating': '-',
+            'sold_count': '-',
+            'drop_amount': '',
+            'drop_percent': '',
+            'final_url': final_url,
+        }
+    api = f'https://shopee.co.id/api/v4/item/get?itemid={item_id}&shopid={shop_id}'
+    req = urllib.request.Request(api, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = pyjson.loads(resp.read().decode())
+    item = (data or {}).get('data') or {}
+    name = item.get('name') or slug_name.title() or 'Produk Shopee'
+    price = item.get('price') or 0
+    price_before = item.get('price_before_discount') or 0
+    rating = str(round(((item.get('item_rating') or {}).get('rating_star') or 0), 1)) if (item.get('item_rating') or {}).get('rating_star') else '-'
+    sold_count = parse_sold_count(item.get('historical_sold') or 0)
+    price_current = format_price(price / 100000) if price else ''
+    price_previous = format_price(price_before / 100000) if price_before else ''
+    drop_amount = ''
+    drop_percent = ''
+    if price_before and price and price_before > price:
+        amount = int((price_before - price) / 100000)
+        pct = round((price_before - price) / price_before * 100)
+        drop_amount = format_price(amount)
+        drop_percent = f'{pct}%'
+    category = infer_category(name)
+    reason = generate_reason(name, category, rating, sold_count, price_current)
+    return {
+        'label': name,
+        'category': category,
+        'reason': reason,
+        'price_previous': price_previous,
+        'price_current': price_current,
+        'rating': rating,
+        'sold_count': sold_count,
+        'drop_amount': drop_amount,
+        'drop_percent': drop_percent,
+        'final_url': final_url,
+    }
+
+
 def build_post_text(label: str, short_link: str, category: str = 'general', reason: str = '', price_previous: str = '', price_current: str = '', rating: str = '', sold_count: str = '', drop_amount: str = '', drop_percent: str = '') -> str:
     lines = ['🔥 *Harga Turun*', f'*{label or "Produk Pilihan"}*', '']
     if price_previous:
@@ -239,8 +368,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         'Pemburu Promo Shopee Bot siap.\n\n'
         'Mode manual:\n'
-        '/post <payload_lengkap> - post ke channel dengan caption lengkap\n'
-        '/preview <payload_lengkap> - preview caption tanpa kirim\n'
+        '/post <short_affiliate_link> - bot generate caption otomatis lalu post ke channel\n'
+        '/preview <short_affiliate_link> - bot generate preview caption otomatis\n'
         '/add_watch <short_link> | <label> | <category> | <reason> | <harga_lama> | <harga_sekarang>\n'
         '/list_watch - lihat watchlist aktif\n\n'
         'Mode otomatis V1:\n'
@@ -249,7 +378,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         '/auto_status - status auto mode\n'
         '/run_once - jalankan 1 siklus auto sekarang\n\n'
         f'Status auto saat ini: {auto_mode.upper()}\n'
-        'Catatan V1: manual mode menerima short affiliate link s.shopee.co.id + metadata produk lengkap; auto mode masih berbasis watchlist, belum full scraping harga live.'
+        'Catatan V1: manual mode cukup short affiliate link s.shopee.co.id dan bot akan generate caption otomatis; auto mode masih berbasis watchlist, belum full scraping harga live.'
     )
     await update.message.reply_text(text)
 
@@ -292,28 +421,43 @@ def parse_manual_payload(raw: str) -> Optional[dict]:
 async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_unauthorized(update):
         return
-    raw = ' '.join(context.args).strip()
-    payload = parse_manual_payload(raw)
-    if not payload:
-        await update.message.reply_text('Format V1: /preview <short_link> | <nama produk> | <category> | <reason> | <harga_lama> | <harga_sekarang> | <rating> | <sold_count> | <hemat_nominal/hemat_percent>')
+    if not context.args:
+        await update.message.reply_text('Format: /preview <short_affiliate_link>')
         return
-    text = build_post_text(**payload)
-    await update.message.reply_text(text, parse_mode='Markdown', disable_web_page_preview=False)
+    link = context.args[0].strip()
+    if not validate_affiliate_link(link):
+        await update.message.reply_text('Link tidak valid. Gunakan short affiliate link seperti https://s.shopee.co.id/...')
+        return
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    try:
+        meta = await asyncio.to_thread(fetch_product_metadata, link)
+        text = build_post_text(short_link=link, **meta)
+        await update.message.reply_text(text, parse_mode='Markdown', disable_web_page_preview=False)
+    except Exception as e:
+        logger.exception('preview failed')
+        await update.message.reply_text(f'Preview gagal: {e}')
 
 
 async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_unauthorized(update):
         return
-    raw = ' '.join(context.args).strip()
-    payload = parse_manual_payload(raw)
-    if not payload:
-        await update.message.reply_text('Format V1: /post <short_link> | <nama produk> | <category> | <reason> | <harga_lama> | <harga_sekarang> | <rating> | <sold_count> | <hemat_nominal/hemat_percent>\n\nContoh:\n/post https://s.shopee.co.id/7VBbZivajq | Himalaya Brightening Vitamin C - Orange Face Serum 15ml | beauty | Cocok buat yang lagi cari serum vitamin C dengan rating bagus dan harga lagi turun lumayan. | Rp61.800 | Rp29.285 | 4.9 | 5RB+ | Rp32.515/53%')
+    if not context.args:
+        await update.message.reply_text('Format: /post <short_affiliate_link>')
         return
-    text = build_post_text(**payload)
+    link = context.args[0].strip()
+    if not validate_affiliate_link(link):
+        await update.message.reply_text('Link tidak valid. Gunakan short affiliate link seperti https://s.shopee.co.id/...')
+        return
     await update.message.reply_chat_action(ChatAction.TYPING)
-    msg_id = await send_channel_post(context.application, text)
-    log_post('manual', payload['label'], payload['short_link'], payload['category'], payload['reason'], msg_id)
-    await update.message.reply_text(f'Berhasil dipost ke channel. message_id={msg_id}')
+    try:
+        meta = await asyncio.to_thread(fetch_product_metadata, link)
+        text = build_post_text(short_link=link, **meta)
+        msg_id = await send_channel_post(context.application, text)
+        log_post('manual', meta['label'], link, meta['category'], meta['reason'], msg_id)
+        await update.message.reply_text(f'Berhasil dipost ke channel. message_id={msg_id}')
+    except Exception as e:
+        logger.exception('post failed')
+        await update.message.reply_text(f'Post gagal: {e}')
 
 
 async def add_watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
