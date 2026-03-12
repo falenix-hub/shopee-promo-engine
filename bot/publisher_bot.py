@@ -431,7 +431,8 @@ async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_chat_action(ChatAction.TYPING)
     try:
         meta = await asyncio.to_thread(fetch_product_metadata, link)
-        text = build_post_text(short_link=link, **meta)
+        payload = {k: v for k, v in meta.items() if k in {'label','category','reason','price_previous','price_current','rating','sold_count','drop_amount','drop_percent'}}
+        text = build_post_text(short_link=link, **payload)
         await update.message.reply_text(text, parse_mode='Markdown', disable_web_page_preview=False)
     except Exception as e:
         logger.exception('preview failed')
@@ -451,7 +452,8 @@ async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_chat_action(ChatAction.TYPING)
     try:
         meta = await asyncio.to_thread(fetch_product_metadata, link)
-        text = build_post_text(short_link=link, **meta)
+        payload = {k: v for k, v in meta.items() if k in {'label','category','reason','price_previous','price_current','rating','sold_count','drop_amount','drop_percent'}}
+        text = build_post_text(short_link=link, **payload)
         msg_id = await send_channel_post(context.application, text)
         log_post('manual', meta['label'], link, meta['category'], meta['reason'], msg_id)
         await update.message.reply_text(f'Berhasil dipost ke channel. message_id={msg_id}')
